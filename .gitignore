@@ -1,0 +1,4 @@
+dist
+node_modules
+
+deployment/collector-stack-packaged.yaml

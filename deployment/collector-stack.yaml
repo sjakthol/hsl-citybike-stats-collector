@@ -1,0 +1,125 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: HSL Citybike Data Collector
+
+Parameters:
+  Contact:
+    Type: String
+    Description: The email to send alarms to
+    Default: sjakthol@outlook.com
+
+Resources:
+  StatsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - { AttributeName: StationId, AttributeType: 'S' }
+        - { AttributeName: Timestamp, AttributeType: 'S' }
+      KeySchema:
+        - { AttributeName: StationId, KeyType: HASH }
+        - { AttributeName: Timestamp, KeyType: RANGE }
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 5
+      TableName: !Sub ${AWS::StackName}-stats
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-stats
+
+  CollectorLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code: ../dist
+      Environment:
+        Variables:
+          STATS_TABLE_NAME: !Ref StatsTable
+          LOG_LEVEL: info
+      Handler: bundle.handler
+      MemorySize: 256
+      Role: !GetAtt CollectorLambdaRole.Arn
+      Runtime: 'nodejs8.10'
+      Timeout: 60
+
+  CollectorLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: AllowWritesToCloudWatchLogs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+              - Effect: Allow
+                Action:
+                  - dynamodb:BatchWriteItem
+                Resource: !GetAtt StatsTable.Arn
+
+  CollectorLambdaLogGroup:
+    Type: "AWS::Logs::LogGroup"
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${CollectorLambda}'
+      RetentionInDays: 30
+
+  CollectorLambdaSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Trigger collector lambda once every five minutes
+      ScheduleExpression: 'rate(5 minutes)'
+      State: ENABLED
+      Targets:
+        -
+          Arn: !GetAtt CollectorLambda.Arn
+          Id: CollectorLambda
+
+  CollectorLambdaCloudWatchInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CollectorLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CollectorLambdaSchedule.Arn
+
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${AWS::StackName}-alarms'
+
+  AlarmSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: email
+      Endpoint: !Ref Contact
+      TopicArn: !Ref AlarmTopic
+
+  ErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - !Ref AlarmTopic
+      AlarmDescription: Alarm if collector function fails with consecutive errors
+      AlarmName: !Sub ${AWS::StackName}-errors
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - { Name: FunctionName, Value: !Ref CollectorLambda }
+      EvaluationPeriods: 2
+      InsufficientDataActions:
+        - !Ref AlarmTopic
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      OKActions:
+        - !Ref AlarmTopic
+      Period: 300
+      Statistic: Sum
+      Threshold: 1
