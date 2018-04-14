@@ -35,6 +35,6 @@
     "node": ">=8"
   },
   "pre-commit": [
-    "standard"
+    "lint"
   ]
 }
